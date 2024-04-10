@@ -1,0 +1,146 @@
+#!@BASH@
+#-*-sh-*-
+
+#
+# Copyright © 2015-2023 Inria.  All rights reserved.
+# See COPYING in top-level directory.
+#
+
+HWLOC_top_srcdir="@HWLOC_top_srcdir@"
+HWLOC_top_builddir="@HWLOC_top_builddir@"
+lstopo="$HWLOC_top_builddir/utils/lstopo/lstopo-no-graphics"
+
+HWLOC_PLUGINS_PATH=${HWLOC_top_builddir}/hwloc/.libs
+export HWLOC_PLUGINS_PATH
+
+HWLOC_DONT_ADD_VERSION_INFO=1
+export HWLOC_DONT_ADD_VERSION_INFO
+
+HWLOC_XML_EXPORT_SUPPORT=0
+export HWLOC_XML_EXPORT_SUPPORT
+
+# make sure we use default numeric formats (only XML outputs are dis-localized when supported)
+LANG=C
+LC_ALL=C
+export LANG LC_ALL
+
+error()
+{
+    echo $@ 2>&1
+}
+
+if [ ! -x "$lstopo" ]
+then
+    error "Could not find executable file \`$lstopo'."
+    exit 1
+fi
+
+testname="$1"
+dirname=`dirname $1`
+basename=`basename $1 .test`
+
+if test \! -f "$testname"; then
+  echo "Cannot find test file $testname"
+  exit 1
+fi
+
+dir="`mktemp -d`"
+
+####################################
+# foo.test should contain:
+# - source: tarball filename (must be in same directory as foo.test)
+# - target: expected output filename (must be in same directory as foo.test, ends with either .console or .xml)
+# - options: lstopo options, if any
+# - env: environment variable lines to be sourced, if any
+
+source=`sed -n 's/^source: *//p' "$testname"`
+target=`sed -n 's/^target: *//p' "$testname"`
+opts=`sed -n 's/^options: *//p' "$testname"`
+sed -n 's/^env://p' "$testname" > "$dir/env"
+
+if test \! -f "$dirname/$source"; then
+  echo "Cannot find source file $source from test $testname"
+  exit 1
+fi
+if test \! -f "$dirname/$target"; then
+  echo "Cannot find target file $target from test $testname"
+  exit 1
+fi
+
+[ -z "$opts" ] && opts="-v -"
+if test "$target" = `basename $target .xml`".xml"; then
+  is_xml_target=1
+  opts="--of xml $opts"
+else
+  is_xml_target=0
+  opts="--of console $opts"
+fi
+
+# set HWLOC_COMPONENTS here so that tests may change the order in the .env below
+export HWLOC_COMPONENTS=x86,linux,stop
+
+. "$dir/env"
+
+# test_topology NAME TOPOLOGY-DIR
+#
+# Test the topology under TOPOLOGY-DIR.  Return true on success.
+test_topology ()
+{
+    local srcdir="$1"
+    local expected_output="$dirname/$target"
+
+    local output="`mktemp`"
+
+    export HWLOC_THISSYSTEM=0
+    export HWLOC_DEBUG_CHECK=1
+    export HWLOC_FSROOT="$srcdir/fsroot"
+    export HWLOC_CPUID_PATH="$srcdir/cpuid"
+
+    if ! "$lstopo" $opts \
+        | sed   -e 's/ id="obj[0-9]*"//' \
+        | sed   -e 's/ gp_index="[0-9]*"//' \
+	> "$output"
+	# filtered id/gp_index because it depends on the insertiong order, which may depend on pciaccess version, etc
+    then
+	result=1
+    else
+	if [ "$HWLOC_UPDATE_TEST_TOPOLOGY_OUTPUT" != 1 ]
+	then
+	    @DIFF@ @HWLOC_DIFF_U@ @HWLOC_DIFF_W@ "$expected_output" "$output"
+	    result=$?
+	else
+	    if ! @DIFF@ "$expected_output" "$output" >/dev/null
+	    then
+		cp -f "$output" "$expected_output"
+		echo "Updated $expected_output"
+	    fi
+	    result=0
+	fi
+    fi
+
+    rm "$output"
+
+    return $result
+}
+
+result=1
+
+if ! ( bunzip2 -c "$dirname/$source" | ( cd "$dir" && tar xf - $tar_options ) )
+then
+    error "failed to extract topology and cpuid \`$source'"
+else
+    actual_dir="`echo "$dir"/*/`"
+
+    if [ -d "$actual_dir" ]
+    then
+	test_topology "$actual_dir"
+	result=$?
+    else
+	# Skip this test.
+	result=77
+    fi
+fi
+
+rm -rf "$dir"
+
+exit $result
